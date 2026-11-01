@@ -4,10 +4,13 @@ import { DB } from '../db/database';
 import { notFound } from '../domain/errors';
 import { CartService } from '../services/cartService';
 import { CheckoutService } from '../services/checkoutService';
+import { CouponService } from '../services/couponService';
 import { OrderService } from '../services/orderService';
 import { FakePaymentGateway, PaymentGateway } from '../services/payment';
 import { ProductService } from '../services/productService';
+import { ReportService } from '../services/reportService';
 import { errorHandler } from './errorHandler';
+import { adminRoutes } from './routes/admin';
 import { cartRoutes } from './routes/carts';
 import { orderRoutes } from './routes/orders';
 import { productRoutes } from './routes/products';
@@ -17,6 +20,8 @@ export interface Services {
   carts: CartService;
   checkout: CheckoutService;
   orders: OrderService;
+  coupons: CouponService;
+  reports: ReportService;
 }
 
 export interface AppDeps {
@@ -33,6 +38,8 @@ export function createApp(deps: AppDeps): Express {
     carts: new CartService(deps.db),
     checkout: new CheckoutService(deps.db, payments),
     orders: new OrderService(deps.db),
+    coupons: new CouponService(deps.db, deps.config.milestoneN, deps.config.discountPercentX),
+    reports: new ReportService(deps.db, deps.config.milestoneN, deps.config.discountPercentX),
   };
 
   const app = express();
@@ -45,6 +52,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/products', productRoutes(services));
   app.use('/carts', cartRoutes(services));
   app.use('/orders', orderRoutes(services));
+  app.use('/admin', adminRoutes(services));
 
   app.use((req, _res, next) => next(notFound('NOT_FOUND', `No route for ${req.method} ${req.path}`)));
   app.use(errorHandler);
