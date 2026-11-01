@@ -164,6 +164,29 @@ export class CartService {
     return this.view(cartId);
   }
 
+  /**
+   * The customer explicitly accepts the current catalogue prices for every line
+   * (after checkout answered PRICE_CHANGED). Kept as a separate, deliberate
+   * step so a blind checkout retry can never charge a price the customer has
+   * not seen.
+   */
+  acceptCurrentPrices(cartId: string) {
+    this.db
+      .transaction(() => {
+        this.getOpenCart(cartId);
+        this.db
+          .prepare(
+            `UPDATE cart_items
+                SET price_seen_paise = (SELECT price_paise FROM products p WHERE p.id = cart_items.product_id)
+              WHERE cart_id = ?`,
+          )
+          .run(cartId);
+        this.touch(cartId, new Date().toISOString());
+      })
+      .immediate();
+    return this.view(cartId);
+  }
+
   removeItem(cartId: string, productId: string) {
     this.db
       .transaction(() => {
