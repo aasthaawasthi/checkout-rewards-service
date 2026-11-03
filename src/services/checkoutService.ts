@@ -1,8 +1,9 @@
-import { createHash, randomUUID } from 'crypto';
+import { and, asc, eq, gte, max, sql } from 'drizzle-orm';
+import { createHash, randomUUID } from 'node:crypto';
 import { DB } from '../db/database';
+import { cartItems, carts, coupons, idempotencyKeys, orderItems, orders, products } from '../db/schema';
 import { AppError, conflict, notFound, unprocessable } from '../domain/errors';
 import { lineTotal, percentDiscount, sum } from '../domain/money';
-import { CartRow } from './cartService';
 import { PaymentGateway } from './payment';
 
 export interface CheckoutInput {
@@ -18,21 +19,6 @@ export interface CheckoutOutcome {
   replayed: boolean;
 }
 
-interface LineRow {
-  product_id: string;
-  quantity: number;
-  price_seen_paise: number;
-  name: string;
-  price_paise: number;
-  stock: number;
-}
-
-interface CouponRow {
-  code: string;
-  discount_percent: number;
-  status: 'AVAILABLE' | 'REDEEMED';
-}
-
 export function normalizeCouponCode(code: string): string {
   return code.trim().toUpperCase();
 }
@@ -42,8 +28,9 @@ export function normalizeCouponCode(code: string): string {
  *
  * Everything happens inside a single IMMEDIATE transaction. IMMEDIATE takes
  * SQLite's write lock at BEGIN, so checkouts (and any other writers, in this
- * process or another process using the same file) are serialised. Every
- * check below therefore sees data that cannot change until we commit.
+ * process or another process using the same file) are serialised and wait for
+ * each other instead of failing. Every check below sees data that cannot change
+ * until we commit.
  *
  * Failure at any step throws, and the transaction rolls back: stock, coupon,
  * cart status and idempotency record are all left exactly as they were. That
@@ -74,50 +61,56 @@ export class CheckoutService {
       .update(JSON.stringify({ cartId: input.cartId, couponCode }))
       .digest('hex');
 
-    return this.db
-      .transaction((): CheckoutOutcome => {
+    return this.db.transaction(
+      (tx): CheckoutOutcome => {
         // 1. Idempotency ------------------------------------------------------
-        const previous = this.db
-          .prepare('SELECT request_hash, order_id FROM idempotency_keys WHERE key = ?')
-          .get(input.idempotencyKey) as { request_hash: string; order_id: string } | undefined;
+        const previous = tx
+          .select({ requestHash: idempotencyKeys.requestHash, orderId: idempotencyKeys.orderId })
+          .from(idempotencyKeys)
+          .where(eq(idempotencyKeys.key, input.idempotencyKey))
+          .get();
         if (previous) {
-          if (previous.request_hash !== requestHash) {
+          if (previous.requestHash !== requestHash) {
             throw unprocessable(
               'IDEMPOTENCY_KEY_REUSED',
               'This Idempotency-Key was already used for a different checkout request',
               { idempotencyKey: input.idempotencyKey },
             );
           }
-          return { orderId: previous.order_id, replayed: true };
+          return { orderId: previous.orderId, replayed: true };
         }
 
         // 2. Cart -------------------------------------------------------------
-        const cart = this.db.prepare('SELECT * FROM carts WHERE id = ?').get(input.cartId) as CartRow | undefined;
+        const cart = tx.select().from(carts).where(eq(carts.id, input.cartId)).get();
         if (!cart) throw notFound('CART_NOT_FOUND', `Cart ${input.cartId} does not exist`, { cartId: input.cartId });
         if (cart.status !== 'OPEN') {
-          const existing = this.db.prepare('SELECT id FROM orders WHERE cart_id = ?').get(cart.id) as
-            | { id: string }
-            | undefined;
+          const existing = tx.select({ id: orders.id }).from(orders).where(eq(orders.cartId, cart.id)).get();
           throw conflict('CART_ALREADY_CHECKED_OUT', 'This cart has already been checked out', {
             cartId: cart.id,
             orderId: existing?.id ?? null,
           });
         }
 
-        const lines = this.db
-          .prepare(
-            `SELECT ci.product_id, ci.quantity, ci.price_seen_paise, p.name, p.price_paise, p.stock
-               FROM cart_items ci JOIN products p ON p.id = ci.product_id
-              WHERE ci.cart_id = ?
-              ORDER BY ci.product_id`,
-          )
-          .all(cart.id) as LineRow[];
+        const lines = tx
+          .select({
+            productId: cartItems.productId,
+            quantity: cartItems.quantity,
+            priceSeenPaise: cartItems.priceSeenPaise,
+            name: products.name,
+            pricePaise: products.pricePaise,
+            stock: products.stock,
+          })
+          .from(cartItems)
+          .innerJoin(products, eq(products.id, cartItems.productId))
+          .where(eq(cartItems.cartId, cart.id))
+          .orderBy(asc(cartItems.productId))
+          .all();
         if (lines.length === 0) throw unprocessable('CART_EMPTY', 'Cannot check out an empty cart', { cartId: cart.id });
 
         // 3. Prices -----------------------------------------------------------
         const priceChanges = lines
-          .filter((l) => l.price_paise !== l.price_seen_paise)
-          .map((l) => ({ productId: l.product_id, priceSeenPaise: l.price_seen_paise, currentPricePaise: l.price_paise }));
+          .filter((l) => l.pricePaise !== l.priceSeenPaise)
+          .map((l) => ({ productId: l.productId, priceSeenPaise: l.priceSeenPaise, currentPricePaise: l.pricePaise }));
         if (priceChanges.length > 0) {
           throw conflict(
             'PRICE_CHANGED',
@@ -129,17 +122,20 @@ export class CheckoutService {
         // 4. Stock (report every short line, not just the first) --------------
         const shortages = lines
           .filter((l) => l.stock < l.quantity)
-          .map((l) => ({ productId: l.product_id, requested: l.quantity, available: l.stock }));
+          .map((l) => ({ productId: l.productId, requested: l.quantity, available: l.stock }));
         if (shortages.length > 0) {
           throw conflict('INSUFFICIENT_STOCK', 'Not enough stock for some items', { items: shortages });
         }
 
         // 5. Coupon -----------------------------------------------------------
-        let coupon: CouponRow | undefined;
+        const coupon = couponCode
+          ? tx
+              .select({ code: coupons.code, discountPercent: coupons.discountPercent, status: coupons.status })
+              .from(coupons)
+              .where(eq(coupons.code, couponCode))
+              .get()
+          : undefined;
         if (couponCode) {
-          coupon = this.db
-            .prepare('SELECT code, discount_percent, status FROM coupons WHERE code = ?')
-            .get(couponCode) as CouponRow | undefined;
           if (!coupon) throw unprocessable('COUPON_NOT_FOUND', `Coupon ${couponCode} does not exist`, { couponCode });
           if (coupon.status !== 'AVAILABLE') {
             throw conflict('COUPON_ALREADY_REDEEMED', `Coupon ${couponCode} has already been redeemed`, { couponCode });
@@ -148,14 +144,14 @@ export class CheckoutService {
 
         // 6. Totals -----------------------------------------------------------
         const orderLines = lines.map((l) => ({
-          productId: l.product_id,
+          productId: l.productId,
           name: l.name,
-          unitPricePaise: l.price_paise,
+          unitPricePaise: l.pricePaise,
           quantity: l.quantity,
-          lineTotalPaise: lineTotal(l.price_paise, l.quantity),
+          lineTotalPaise: lineTotal(l.pricePaise, l.quantity),
         }));
         const subtotalPaise = sum(orderLines.map((l) => l.lineTotalPaise));
-        const discountPaise = coupon ? percentDiscount(subtotalPaise, coupon.discount_percent) : 0;
+        const discountPaise = coupon ? percentDiscount(subtotalPaise, coupon.discountPercent) : 0;
         const totalPaise = subtotalPaise - discountPaise;
 
         // 7. Payment ----------------------------------------------------------
@@ -173,58 +169,60 @@ export class CheckoutService {
         // 8. Writes -----------------------------------------------------------
         const now = new Date().toISOString();
 
-        // Conditional decrement: the database refuses to go below zero even if a
-        // future code path skipped step 4. (The CHECK (stock >= 0) is a second net.)
-        const decrement = this.db.prepare(
-          'UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ? AND stock >= ?',
-        );
+        // Conditional, atomic decrement (stock = stock - q WHERE stock >= q): the
+        // database refuses to go below zero even if a future code path skipped
+        // step 4. The CHECK (stock >= 0) constraint is a second net.
         for (const l of orderLines) {
-          if (decrement.run(l.quantity, now, l.productId, l.quantity).changes !== 1) {
+          const result = tx
+            .update(products)
+            .set({ stock: sql`${products.stock} - ${l.quantity}`, updatedAt: now })
+            .where(and(eq(products.id, l.productId), gte(products.stock, l.quantity)))
+            .run();
+          if (result.changes !== 1) {
             throw conflict('INSUFFICIENT_STOCK', 'Not enough stock for some items', {
               items: [{ productId: l.productId, requested: l.quantity }],
             });
           }
         }
 
-        const { next } = this.db
-          .prepare('SELECT COALESCE(MAX(order_number), 0) + 1 AS next FROM orders')
-          .get() as { next: number };
+        const { lastNumber } = tx.select({ lastNumber: max(orders.orderNumber) }).from(orders).get()!;
 
-        this.db
-          .prepare(
-            `INSERT INTO orders (id, order_number, cart_id, status, subtotal_paise, discount_paise, total_paise,
-                                 coupon_code, discount_percent, payment_reference, created_at)
-             VALUES (?, ?, ?, 'PLACED', ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            orderId,
-            next,
-            cart.id,
+        tx.insert(orders)
+          .values({
+            id: orderId,
+            orderNumber: (lastNumber ?? 0) + 1,
+            cartId: cart.id,
+            status: 'PLACED',
             subtotalPaise,
             discountPaise,
             totalPaise,
-            coupon?.code ?? null,
-            coupon?.discount_percent ?? null,
-            payment.reference,
-            now,
-          );
+            couponCode: coupon?.code ?? null,
+            discountPercent: coupon?.discountPercent ?? null,
+            paymentReference: payment.reference,
+            createdAt: now,
+          })
+          .run();
 
-        const insertItem = this.db.prepare(
-          `INSERT INTO order_items (order_id, product_id, product_name, unit_price_paise, quantity, line_total_paise)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        );
-        for (const l of orderLines) {
-          insertItem.run(orderId, l.productId, l.name, l.unitPricePaise, l.quantity, l.lineTotalPaise);
-        }
+        tx.insert(orderItems)
+          .values(
+            orderLines.map((l) => ({
+              orderId,
+              productId: l.productId,
+              productName: l.name,
+              unitPricePaise: l.unitPricePaise,
+              quantity: l.quantity,
+              lineTotalPaise: l.lineTotalPaise,
+            })),
+          )
+          .run();
 
         if (coupon) {
           // Conditional redeem: only one transaction can flip AVAILABLE -> REDEEMED.
-          const redeemed = this.db
-            .prepare(
-              `UPDATE coupons SET status = 'REDEEMED', redeemed_order_id = ?, redeemed_at = ?
-                WHERE code = ? AND status = 'AVAILABLE'`,
-            )
-            .run(orderId, now, coupon.code);
+          const redeemed = tx
+            .update(coupons)
+            .set({ status: 'REDEEMED', redeemedOrderId: orderId, redeemedAt: now })
+            .where(and(eq(coupons.code, coupon.code), eq(coupons.status, 'AVAILABLE')))
+            .run();
           if (redeemed.changes !== 1) {
             throw conflict('COUPON_ALREADY_REDEEMED', `Coupon ${coupon.code} has already been redeemed`, {
               couponCode: coupon.code,
@@ -232,21 +230,22 @@ export class CheckoutService {
           }
         }
 
-        const closed = this.db
-          .prepare(`UPDATE carts SET status = 'CHECKED_OUT', updated_at = ? WHERE id = ? AND status = 'OPEN'`)
-          .run(now, cart.id);
+        const closed = tx
+          .update(carts)
+          .set({ status: 'CHECKED_OUT', updatedAt: now })
+          .where(and(eq(carts.id, cart.id), eq(carts.status, 'OPEN')))
+          .run();
         if (closed.changes !== 1) {
           throw conflict('CART_ALREADY_CHECKED_OUT', 'This cart has already been checked out', { cartId: cart.id });
         }
 
-        this.db
-          .prepare(
-            `INSERT INTO idempotency_keys (key, cart_id, request_hash, order_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-          )
-          .run(input.idempotencyKey, cart.id, requestHash, orderId, now);
+        tx.insert(idempotencyKeys)
+          .values({ key: input.idempotencyKey, cartId: cart.id, requestHash, orderId, createdAt: now })
+          .run();
 
         return { orderId, replayed: false };
-      })
-      .immediate();
+      },
+      { behavior: 'immediate' },
+    );
   }
 }

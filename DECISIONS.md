@@ -73,7 +73,7 @@ Each invariant is listed with **where it is enforced**. Most have two layers: th
 
 **Choice:** SQLite (WAL mode, `busy_timeout = 5000`, foreign keys on).
 
-**Why:** Rollback-on-throw gives "a failing checkout consumes nothing" for free, and constraints give a second line of defence for every invariant. Because two processes can open the same file, the test suite can run two service instances against one database and show the invariants hold across processes (§9). The SQL also ports almost directly to Postgres (§8).
+**Why:** Rollback-on-throw gives "a failing checkout consumes nothing" for free, and constraints give a second line of defence for every invariant. Because two processes can open the same file, the test suite can run two service instances against one database and show the invariants hold across processes (§9). Data access goes through Drizzle ORM (Decision 11), whose schema and query builder also exist for Postgres, so the move in §8 is mostly a dialect change.
 
 **Consequences:** SQLite allows one writer at a time. That's fine at this scale, and it makes reasoning simple, but it caps write throughput (§8). `better-sqlite3` is synchronous, so the fake payment must be synchronous too (Decision 6).
 
@@ -210,6 +210,34 @@ On success, the key row is inserted **in the same transaction** as the order, so
 
 ---
 
+### Decision 11: Drizzle ORM for data access, with constraints and migrations in the schema
+
+**Context:** The first version used hand-written SQL through `better-sqlite3`. That's explicit, but there's no typing between queries and the schema, and schema changes have no migration history. I wanted typed queries, a single schema definition and versioned migrations, without losing control over the exact statements the concurrency guarantees rely on.
+
+**Options considered:**
+- **Raw SQL (status quo).** Full control, but no types, and the schema lives in a string.
+- **Prisma.** The most popular choice. But its SQLite interactive transactions don't let you choose `BEGIN IMMEDIATE`, so concurrent writers would fail with `SQLITE_BUSY` instead of waiting. It also adds a generate step and a query engine.
+- **TypeORM.** Entity classes and decorators, familiar from NestJS. It's heavier, and `IMMEDIATE` transactions need workarounds.
+- **Drizzle ORM.** A thin, typed query builder over the same `better-sqlite3` driver; `drizzle-kit` generates SQL migrations from a TypeScript schema.
+
+**Choice:** Drizzle.
+- The schema in `src/db/schema.ts` declares every table, `UNIQUE` and `CHECK` constraint.
+- `npm run db:generate` produces the SQL migration in `drizzle/`, which the service applies on startup (`npm run db:migrate` runs it as a separate step).
+- All application queries use the query builder; there is no hand-written SQL in the services. The only `sql` fragments are the CHECK definitions and the atomic decrement `stock = stock - q`, which Drizzle has no helper for.
+
+**Why:** Drizzle keeps what correctness depends on:
+- synchronous transactions with `{ behavior: 'immediate' }`
+- conditional updates whose `.run().changes` we check
+- constraints declared in the schema and visible in the generated migration
+
+It also adds compile-time checking of every column and query. After the switch, all 39 tests and every mutation check in §9 behaved exactly as before.
+
+**Consequences:**
+- Drizzle's migrator reads which migrations were applied *before* opening its transaction. In principle, two instances starting on an empty database at the same instant could both try to apply the first migration, and the loser would fail with "table already exists". I didn't reproduce this in 15 simultaneous starts, but re-running the migrator is safe, so startup retries on that error (`runMigrations` in `database.ts`). In production, migrations would run once as a deploy step.
+- Aggregates like `SUM()` come back as strings (to avoid overflow); the report maps them to numbers, which is safe within our money bounds (§5).
+
+---
+
 ## 4. Transactions, concurrency and idempotency
 
 **Write paths** (checkout, add/update/remove item, accept prices, coupon generation, product admin) all run in `BEGIN IMMEDIATE` transactions. SQLite has one write lock per database file, so these are serialised across all connections and **all processes** on the same file. A writer that finds the lock held waits up to 5 s (`busy_timeout`). If it still can't get it, the client gets `503 SERVICE_BUSY` with `Retry-After`, and nothing has changed, so a retry with the same key is safe.
@@ -326,7 +354,7 @@ A throw at any step rolls back steps 1–8.
 
 ## 9. How the tests were validated
 
-Passing tests prove little unless they fail on wrong code. I broke the checkout and coupon logic on purpose and re-ran the suite:
+Passing tests prove little unless they fail on wrong code. I broke the checkout and coupon logic on purpose and re-ran the suite. I did this once on the raw-SQL version, and again for the first three mutations after moving to Drizzle, with the same results:
 
 | Mutation | Result |
 |---|---|
@@ -351,7 +379,9 @@ Examples where AI output was corrected or redirected:
 1. **Price-change handling.** The first design refreshed the cart's prices as a side effect of a checkout that failed with `PRICE_CHANGED`. It looked user-friendly, but a client blindly retrying the same request would then be charged a price the customer never saw, and "failed checkouts have no side effects" would no longer be true. It was replaced with an explicit `accept-current-prices` step (Decision 4).
 2. **"IMMEDIATE prevents overselling."** The draft reasoning credited the IMMEDIATE lock mode with preventing overselling. Mutation testing showed a deferred transaction still passed every test. The protection actually comes from conditional updates and constraints; IMMEDIATE is about waiting instead of failing under contention. The docs were corrected and the test gap recorded (§9).
 3. **Toolchain.** The initial install pulled TypeScript 7 and Jest 30, which `ts-jest` doesn't support. They were pinned to TypeScript 5.9 / Jest 29.
-4. _(Add your own review finding here: something you questioned, changed or rejected.)_
+4. **Server startup.** The generated `server.ts` used `app.listen(port, callback)` without checking the callback's error argument. In Express 5 that argument carries startup failures such as a port already in use, so the service would have printed "listening" even when it failed to start. It now checks the error and exits.
+5. **Raw SQL replaced with an ORM.** The first version used hand-written SQL strings. The data layer was moved to Drizzle ORM (Decision 11), keeping the IMMEDIATE transactions and conditional updates. Every test and mutation check was then re-run.
+6. _(Add your own review finding here: something you questioned, changed or rejected.)_
 
 ---
 

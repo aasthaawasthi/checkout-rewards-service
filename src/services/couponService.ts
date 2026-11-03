@@ -1,17 +1,8 @@
-import { randomInt } from 'crypto';
+import { asc, count } from 'drizzle-orm';
+import { randomInt } from 'node:crypto';
 import { DB } from '../db/database';
+import { Coupon, coupons, orders } from '../db/schema';
 import { conflict } from '../domain/errors';
-
-interface CouponRow {
-  code: string;
-  milestone: number;
-  unlocked_at_order: number;
-  discount_percent: number;
-  status: 'AVAILABLE' | 'REDEEMED';
-  generated_at: string;
-  redeemed_order_id: string | null;
-  redeemed_at: string | null;
-}
 
 // No 0/O/1/I to avoid codes that are hard to read aloud or type.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -22,16 +13,16 @@ function randomSuffix(length = 6): string {
   return s;
 }
 
-export function toCouponDto(c: CouponRow) {
+export function toCouponDto(c: Coupon) {
   return {
     code: c.code,
     milestone: c.milestone,
-    unlockedAtOrder: c.unlocked_at_order,
-    discountPercent: c.discount_percent,
+    unlockedAtOrder: c.unlockedAtOrder,
+    discountPercent: c.discountPercent,
     status: c.status,
-    generatedAt: c.generated_at,
-    redeemedOrderId: c.redeemed_order_id,
-    redeemedAt: c.redeemed_at,
+    generatedAt: c.generatedAt,
+    redeemedOrderId: c.redeemedOrderId,
+    redeemedAt: c.redeemedAt,
   };
 }
 
@@ -59,12 +50,16 @@ export class CouponService {
   ) {}
 
   generate() {
-    return this.db
-      .transaction(() => {
-        const { placed } = this.db.prepare('SELECT COUNT(*) AS placed FROM orders').get() as { placed: number };
+    return this.db.transaction(
+      (tx) => {
+        const { placed } = tx.select({ placed: count() }).from(orders).get()!;
         const reached = Math.floor(placed / this.milestoneN);
         const rewarded = new Set(
-          (this.db.prepare('SELECT milestone FROM coupons').all() as { milestone: number }[]).map((r) => r.milestone),
+          tx
+            .select({ milestone: coupons.milestone })
+            .from(coupons)
+            .all()
+            .map((r) => r.milestone),
         );
 
         let milestone: number | undefined;
@@ -84,24 +79,26 @@ export class CouponService {
           });
         }
 
-        const now = new Date().toISOString();
-        const code = `REWARD-M${milestone}-${randomSuffix()}`;
-        this.db
-          .prepare(
-            `INSERT INTO coupons (code, milestone, unlocked_at_order, discount_percent, status, generated_at)
-             VALUES (?, ?, ?, ?, 'AVAILABLE', ?)`,
-          )
-          .run(code, milestone, milestone * this.milestoneN, this.discountPercentX, now);
+        const coupon = tx
+          .insert(coupons)
+          .values({
+            code: `REWARD-M${milestone}-${randomSuffix()}`,
+            milestone,
+            unlockedAtOrder: milestone * this.milestoneN,
+            discountPercent: this.discountPercentX,
+            status: 'AVAILABLE',
+            generatedAt: new Date().toISOString(),
+          })
+          .returning()
+          .get();
 
-        const pending = reached - rewarded.size - 1;
-        const coupon = this.db.prepare('SELECT * FROM coupons WHERE code = ?').get(code) as CouponRow;
-        return { coupon: toCouponDto(coupon), remainingEligibleMilestones: pending };
-      })
-      .immediate();
+        return { coupon: toCouponDto(coupon), remainingEligibleMilestones: reached - rewarded.size - 1 };
+      },
+      { behavior: 'immediate' },
+    );
   }
 
   list() {
-    const rows = this.db.prepare('SELECT * FROM coupons ORDER BY milestone').all() as CouponRow[];
-    return rows.map(toCouponDto);
+    return this.db.select().from(coupons).orderBy(asc(coupons.milestone)).all().map(toCouponDto);
   }
 }

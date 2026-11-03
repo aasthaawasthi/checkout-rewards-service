@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { carts, coupons, idempotencyKeys, orders, products } from '../src/db/schema';
 import { checkout, createCart, makeTestApp, placeOrders, TestContext } from './helpers';
 
 describe('admin report', () => {
@@ -42,11 +43,7 @@ describe('admin report', () => {
   it('does not change state when requested repeatedly', async () => {
     await placeOrders(ctx.app, 2);
     const snapshot = () =>
-      JSON.stringify(
-        ['products', 'carts', 'orders', 'coupons', 'idempotency_keys'].map((t) =>
-          ctx.db.prepare(`SELECT * FROM ${t} ORDER BY 1`).all(),
-        ),
-      );
+      JSON.stringify([products, carts, orders, coupons, idempotencyKeys].map((t) => ctx.db.select().from(t).all()));
     const before = snapshot();
     const first = (await request(ctx.app).get('/admin/report')).body;
     const second = (await request(ctx.app).get('/admin/report')).body;

@@ -95,7 +95,7 @@ describe('coupon value is fixed when generated', () => {
       const app1 = createApp({ db: db1, config: { port: 0, dbPath, milestoneN: 1, discountPercentX: 10 } });
       await placeOrders(app1, 1);
       const tenPercent = (await request(app1).post('/admin/coupons').expect(201)).body.coupon.code;
-      db1.close();
+      db1.$client.close();
 
       // Restart with x = 100.
       const db2 = openDatabase(dbPath);
@@ -110,7 +110,7 @@ describe('coupon value is fixed when generated', () => {
       const cart2 = await createCart(app2, [['p-cap', 1]]);
       const freeOrder = await checkout(app2, cart2, { couponCode: free.code }).expect(201);
       expect(freeOrder.body.totalPaise).toBe(0);
-      db2.close();
+      db2.$client.close();
     } finally {
       removeDb(dbPath);
     }

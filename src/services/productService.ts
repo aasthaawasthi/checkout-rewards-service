@@ -1,21 +1,15 @@
+import { asc, eq } from 'drizzle-orm';
 import { DB } from '../db/database';
+import { Product, products } from '../db/schema';
 import { notFound, unprocessable } from '../domain/errors';
 
-export interface ProductRow {
-  id: string;
-  name: string;
-  price_paise: number;
-  stock: number;
-  updated_at: string;
-}
-
-export function toProductDto(p: ProductRow) {
+export function toProductDto(p: Product) {
   return {
     id: p.id,
     name: p.name,
-    unitPricePaise: p.price_paise,
+    unitPricePaise: p.pricePaise,
     availableStock: p.stock,
-    updatedAt: p.updated_at,
+    updatedAt: p.updatedAt,
   };
 }
 
@@ -23,12 +17,11 @@ export class ProductService {
   constructor(private readonly db: DB) {}
 
   list() {
-    const rows = this.db.prepare('SELECT * FROM products ORDER BY id').all() as ProductRow[];
-    return rows.map(toProductDto);
+    return this.db.select().from(products).orderBy(asc(products.id)).all().map(toProductDto);
   }
 
   get(id: string) {
-    const row = this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as ProductRow | undefined;
+    const row = this.db.select().from(products).where(eq(products.id, id)).get();
     if (!row) throw notFound('PRODUCT_NOT_FOUND', `Product ${id} does not exist`, { productId: id });
     return toProductDto(row);
   }
@@ -42,28 +35,22 @@ export class ProductService {
     if (changes.unitPricePaise === undefined && changes.stock === undefined) {
       throw unprocessable('VALIDATION_ERROR', 'Provide unitPricePaise and/or stock');
     }
-    return this.db
-      .transaction(() => {
-        const existing = this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as
-          | ProductRow
-          | undefined;
-        if (!existing) throw notFound('PRODUCT_NOT_FOUND', `Product ${id} does not exist`, { productId: id });
-        this.db
-          .prepare(
-            `UPDATE products
-               SET price_paise = COALESCE(@price, price_paise),
-                   stock       = COALESCE(@stock, stock),
-                   updated_at  = @now
-             WHERE id = @id`,
-          )
-          .run({
-            id,
-            price: changes.unitPricePaise ?? null,
-            stock: changes.stock ?? null,
-            now: new Date().toISOString(),
-          });
-        return toProductDto(this.db.prepare('SELECT * FROM products WHERE id = ?').get(id) as ProductRow);
-      })
-      .immediate();
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(products)
+          .set({
+            ...(changes.unitPricePaise !== undefined && { pricePaise: changes.unitPricePaise }),
+            ...(changes.stock !== undefined && { stock: changes.stock }),
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(products.id, id))
+          .returning()
+          .get();
+        if (!updated) throw notFound('PRODUCT_NOT_FOUND', `Product ${id} does not exist`, { productId: id });
+        return toProductDto(updated);
+      },
+      { behavior: 'immediate' },
+    );
   }
 }

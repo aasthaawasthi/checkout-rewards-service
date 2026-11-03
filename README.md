@@ -4,7 +4,7 @@ Backend for an e-commerce store: carts, checkout, and a milestone reward system 
 
 The focus is **correct behaviour under retries and concurrency**: no overselling, no duplicate orders, no double-redeemed or lost coupons, and a report that always reconciles. The reasoning behind every choice is in **[DECISIONS.md](./DECISIONS.md)**.
 
-- **Stack:** Node.js 20+, TypeScript, Express 5, SQLite (`better-sqlite3`), zod, Jest + Supertest
+- **Stack:** Node.js 20+, TypeScript, Express 5, SQLite via **Drizzle ORM** (`drizzle-orm` + `better-sqlite3` driver, `drizzle-kit` migrations), zod, Jest + Supertest
 - **No external services:** the database is a local file created and seeded on first start
 
 ---
@@ -18,6 +18,14 @@ npm start                     # http://localhost:3000, database at data/store.db
 ```
 
 Development mode (no build step): `npm run dev`
+
+Migrations in `drizzle/` are applied automatically on startup. Other database scripts:
+
+| Script | Does |
+|---|---|
+| `npm run db:migrate` | Apply pending migrations and seed products, then exit (the deploy step in production) |
+| `npm run db:generate` | After editing `src/db/schema.ts`, generate a new SQL migration in `drizzle/` |
+| `npm run db:studio` | Browse the database in Drizzle Studio |
 
 ### Configuration
 
@@ -211,10 +219,13 @@ The report is read in one consistent snapshot and never writes.
 
 ```
 src/
-  server.ts                 entry point
+  server.ts                 entry point (Express 5 listen with error handling, graceful shutdown)
   config.ts                 env config (n, x, port, db path), validated at startup
-  db/database.ts            schema (invariants as constraints), WAL, busy timeout, seeding
+  db/schema.ts              Drizzle schema: tables, UNIQUE and CHECK constraints (the invariants)
+  db/database.ts            connection (WAL, busy timeout), migrations, seeding
+  db/migrate.ts             `npm run db:migrate` entry point
   db/seed.ts                seed catalogue
+drizzle/                    generated SQL migrations (from schema.ts via drizzle-kit)
   domain/money.ts           integer-paise arithmetic and discount rounding
   domain/errors.ts          AppError + error codes
   services/cartService.ts   cart operations

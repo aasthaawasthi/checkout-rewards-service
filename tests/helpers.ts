@@ -1,10 +1,12 @@
-import { randomUUID } from 'crypto';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import { count, eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import request from 'supertest';
 import { AppConfig } from '../src/config';
 import { DB, openDatabase } from '../src/db/database';
+import { coupons, idempotencyKeys, orderItems, orders, products } from '../src/db/schema';
 import { createApp } from '../src/http/app';
 import { FakePaymentGateway } from '../src/services/payment';
 
@@ -36,7 +38,7 @@ export function makeTestApp(overrides: Partial<AppConfig> = {}, dbPath = tempDbP
     dbPath,
     payments,
     close: () => {
-      db.close();
+      db.$client.close();
       removeDb(dbPath);
     },
   };
@@ -75,9 +77,11 @@ export async function placeOrders(app: TestContext['app'], count: number): Promi
 }
 
 export function stockOf(db: DB, productId: string): number {
-  return (db.prepare('SELECT stock FROM products WHERE id = ?').get(productId) as { stock: number }).stock;
+  return db.select({ stock: products.stock }).from(products).where(eq(products.id, productId)).get()!.stock;
 }
 
-export function countRows(db: DB, table: 'orders' | 'coupons' | 'idempotency_keys' | 'order_items'): number {
-  return (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+const TABLES = { orders, coupons, idempotency_keys: idempotencyKeys, order_items: orderItems };
+
+export function countRows(db: DB, table: keyof typeof TABLES): number {
+  return db.select({ n: count() }).from(TABLES[table]).get()!.n;
 }
