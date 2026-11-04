@@ -4,12 +4,14 @@ Backend for an e-commerce store: carts, checkout, and a milestone reward system 
 
 The focus is **correct behaviour under retries and concurrency**: no overselling, no duplicate orders, no double-redeemed or lost coupons, and a report that always reconciles. The reasoning behind every choice is in **[DECISIONS.md](./DECISIONS.md)**.
 
-- **Stack:** Node.js 20+, TypeScript, Express 5, SQLite via **Drizzle ORM** (`drizzle-orm` + `better-sqlite3` driver, `drizzle-kit` migrations), zod, Jest + Supertest
+- **Stack:** Node.js 22 LTS (tested on 22.23; `.nvmrc` included), TypeScript, Express 5, SQLite via **Drizzle ORM** (`drizzle-orm` + `better-sqlite3` driver, `drizzle-kit` migrations), zod, Jest + Supertest
 - **No external services:** the database is a local file created and seeded on first start
 
 ---
 
 ## Quick start
+
+Use the **latest Node 22 LTS** (`nvm use` picks it up from `.nvmrc`). On an early 22.x release (22.8 on macOS), the test run crashed with a segmentation fault, which looks like the native SQLite driver needing a newer Node.
 
 ```bash
 npm install
