@@ -249,7 +249,8 @@ examples/                   demo.sh (curl walkthrough), Postman collection
 | `coupons.test.ts` | milestone gating, one coupon per milestone, catch-up, concurrent generation produces 1 coupon, two checkouts racing for one coupon produce 1 redemption, coupon keeps its percent after x changes, 100% never goes negative |
 | `report-and-validation.test.ts` | report reconciles with `GET /orders`; failed checkouts never appear; repeated reports don't mutate state; invalid input never enters a cart; error envelope |
 | `money.test.ts` | rounding rule, non-negative totals, no fractional money |
-| `multiprocess.test.ts` | **two server processes on one database file** with overlapping checkouts, retries and coupon redemptions. This proves the invariants come from the database, not from Node being single-threaded. |
+| `multiprocess.test.ts` | **two server processes on one database file** with overlapping checkouts, retries and coupon redemptions, plus four instances starting at once on a new database. This proves the invariants come from the database, not from Node being single-threaded. |
+| `startup.test.ts` | startup steps retry when they lose a lock race with another instance starting at the same moment, and nothing else is retried |
 
 The tests were checked by deliberately breaking the code (mutation testing). Details are in DECISIONS.md.
 

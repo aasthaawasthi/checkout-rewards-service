@@ -83,7 +83,10 @@ describeIfBuilt('two service instances sharing one database', () => {
     A = `http://127.0.0.1:${portA}`;
     B = `http://127.0.0.1:${portB}`;
     const env = { ORDER_MILESTONE_N: '1', DISCOUNT_PERCENT_X: '20' };
-    await Promise.all([startServer(portA, dbPath, env), startServer(portB, dbPath, env)]);
+    // Started one after the other: these tests are about overlapping requests.
+    // Simultaneous startup has its own test below.
+    await startServer(portA, dbPath, env);
+    await startServer(portB, dbPath, env);
   });
 
   afterAll(() => {
@@ -151,5 +154,22 @@ describeIfBuilt('two service instances sharing one database', () => {
     const report = await call(B, 'GET', '/admin/report');
     expect(report.body.ordersWithCoupon).toBe(1);
     expect(report.body.netRevenuePaise).toBe(report.body.grossRevenuePaise - report.body.totalDiscountPaise);
+  });
+});
+
+describeIfBuilt('several instances starting at the same moment on a new database', () => {
+  const dbPath = tempDbPath();
+  afterAll(() => {
+    children.forEach((c) => c.kill());
+    removeDb(dbPath);
+  });
+
+  it('all start, migrate once and seed once', async () => {
+    const ports = await Promise.all(Array.from({ length: 4 }, () => freePort()));
+    await Promise.all(ports.map((port) => startServer(port, dbPath, {})));
+
+    const products = await call(`http://127.0.0.1:${ports[3]}`, 'GET', '/products');
+    expect(products.status).toBe(200);
+    expect(products.body.products).toHaveLength(6);
   });
 });

@@ -233,7 +233,11 @@ On success, the key row is inserted **in the same transaction** as the order, so
 It also adds compile-time checking of every column and query. After the switch, all 39 tests and every mutation check in §9 behaved exactly as before.
 
 **Consequences:**
-- Drizzle's migrator reads which migrations were applied *before* opening its transaction. In principle, two instances starting on an empty database at the same instant could both try to apply the first migration, and the loser would fail with "table already exists". I didn't reproduce this in 15 simultaneous starts, but re-running the migrator is safe, so startup retries on that error (`runMigrations` in `database.ts`). In production, migrations would run once as a deploy step.
+- **Startup is the one place instances can collide.** Two problems, both fixed in `openDatabase`:
+    - Drizzle's migrator reads which migrations were applied *before* opening its transaction, so an instance that loses the race can hit "table already exists".
+    - On macOS, when two instances started on a new database at the same moment, switching to WAL mode failed at once with `SQLITE_BUSY`, despite the busy timeout. The likely cause is that SQLite refuses to wait when two connections both need a lock upgrade, to avoid a deadlock.
+
+  Every startup step (WAL switch, migrate, seed) is repeatable, so each is retried with a short pause when it loses such a race (`withStartupRetry`, unit-tested). A test also starts four instances at once on a new database. In production, migrations would run once as a deploy step (`npm run db:migrate`).
 - Aggregates like `SUM()` come back as strings (to avoid overflow); the report maps them to numbers, which is safe within our money bounds (§5).
 
 ---
