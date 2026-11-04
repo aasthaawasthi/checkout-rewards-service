@@ -256,4 +256,4 @@ The tests were checked by deliberately breaking the code (mutation testing). Det
 
 ## Time spent
 
-_To be filled in before submission._
+About 2.5 hours of my own time over four days: directing the work, reviewing changes and testing on my machine. Most of the code was generated with Claude (see DECISIONS.md §10).

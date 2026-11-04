@@ -374,18 +374,16 @@ The last result taught me something. With a deferred transaction, correctness st
 
 ## 10. Use of AI tools
 
-> **TODO (Aastha) — rewrite this section in your own words before submitting.** Keep it honest and specific. The brief asks for "an example where you corrected, rejected, or materially redirected AI output". Use something you actually did while reviewing this code, and keep or drop the examples below depending on whether they reflect your process.
+I built this with Claude, Anthropic's AI coding agent. It wrote most of the implementation, tests and documentation from the assignment brief. My role was to set the direction: I chose the scope and the stack, reviewed what it produced, pushed back where I disagreed, and ran it on my own machine.
 
-I used Claude (an AI coding agent) heavily: to scaffold the project, draft the checkout transaction, tests and documentation, and to discuss trade-offs. I treated its output as a draft to verify, not as finished work. That meant running the service by hand with curl for every error path, reading every SQL statement against the invariants in §1, and mutation-testing the suite (§9).
+**Where I corrected or redirected the AI:**
 
-Examples where AI output was corrected or redirected:
+1. **Server startup.** I questioned whether `server.ts` used the current Express 5 style. Looking into it turned up a real bug: Express 5 passes startup failures (such as a port already in use) to the `app.listen` callback, and the generated code ignored them, so it would print "listening" even when the server failed to start. It now checks the error and exits.
+2. **No hand-written SQL.** The first version used raw SQL strings. I asked for an ORM, compared Drizzle, Prisma and TypeORM, and chose Drizzle (Decision 11). The IMMEDIATE transactions and conditional updates that the concurrency guarantees depend on were kept, and every test was re-run.
+3. **Naming.** The API layer lived in `src/http/`, which read like Node's `http` module. I had it renamed to `src/api/`.
+4. **Running it on my machine.** On my Mac the suite first crashed with a segmentation fault: I was on Node 22.8, too old for the native SQLite driver. After upgrading, three multi-process tests failed: two servers starting at the same moment on a new database hit "database is locked", which never happened on the Linux machine the code was built on. Both problems were fixed. The supported Node version is now documented with a `.nvmrc` file, startup retries a lost lock race, and new tests cover both. All 44 tests now pass on my machine.
 
-1. **Price-change handling.** The first design refreshed the cart's prices as a side effect of a checkout that failed with `PRICE_CHANGED`. It looked user-friendly, but a client blindly retrying the same request would then be charged a price the customer never saw, and "failed checkouts have no side effects" would no longer be true. It was replaced with an explicit `accept-current-prices` step (Decision 4).
-2. **"IMMEDIATE prevents overselling."** The draft reasoning credited the IMMEDIATE lock mode with preventing overselling. Mutation testing showed a deferred transaction still passed every test. The protection actually comes from conditional updates and constraints; IMMEDIATE is about waiting instead of failing under contention. The docs were corrected and the test gap recorded (§9).
-3. **Toolchain.** The initial install pulled TypeScript 7 and Jest 30, which `ts-jest` doesn't support. They were pinned to TypeScript 5.9 / Jest 29.
-4. **Server startup.** The generated `server.ts` used `app.listen(port, callback)` without checking the callback's error argument. In Express 5 that argument carries startup failures such as a port already in use, so the service would have printed "listening" even when it failed to start. It now checks the error and exits.
-5. **Raw SQL replaced with an ORM.** The first version used hand-written SQL strings. The data layer was moved to Drizzle ORM (Decision 11), keeping the IMMEDIATE transactions and conditional updates. Every test and mutation check was then re-run.
-6. _(Add your own review finding here: something you questioned, changed or rejected.)_
+**Corrections made while the code was being built, which I reviewed:** the price-change design was changed so a blind retry can't charge a price the customer hasn't seen (Decision 4). Mutation testing showed that the "IMMEDIATE prevents overselling" reasoning was overstated (§9). The toolchain was pinned to TypeScript 5.9 and Jest 29.
 
 ---
 
