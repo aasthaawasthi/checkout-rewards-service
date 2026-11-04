@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { checkout, countRows, createCart, makeTestApp, placeOrders, tempDbPath, removeDb, TestContext } from './helpers';
 import { openDatabase } from '../src/db/database';
-import { createApp } from '../src/http/app';
+import { createApp } from '../src/api/app';
 
 describe('milestone coupons', () => {
   let ctx: TestContext;

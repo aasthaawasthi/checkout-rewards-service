@@ -9,12 +9,29 @@
  *
  * Requires `npm run build` first (npm test does this).
  */
-import { ChildProcess, spawn } from 'child_process';
-import fs from 'fs';
-import path from 'path';
+import { ChildProcess, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
 import { removeDb, tempDbPath } from './helpers';
 
 const SERVER = path.join(__dirname, '..', 'dist', 'server.js');
+
+// Every spawned server is tracked here so afterAll can stop all of them, even
+// if only one of the two started (otherwise an orphaned child keeps Jest alive).
+const children: ChildProcess[] = [];
+
+/** Asks the OS for a free port instead of guessing one that might be taken. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as net.AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 function startServer(port: number, dbPath: string, env: Record<string, string>): Promise<ChildProcess> {
   return new Promise((resolve, reject) => {
@@ -22,17 +39,25 @@ function startServer(port: number, dbPath: string, env: Record<string, string>):
       env: { ...process.env, PORT: String(port), DB_PATH: dbPath, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const timer = setTimeout(() => reject(new Error(`server on ${port} did not start`)), 10_000);
+    children.push(child);
+    let started = false;
+    const timer = setTimeout(() => reject(new Error(`server on ${port} did not start within 10 s`)), 10_000);
     child.stdout!.on('data', (chunk: Buffer) => {
-      if (chunk.toString().includes('listening')) {
+      if (!started && chunk.toString().includes('listening')) {
+        started = true;
         clearTimeout(timer);
         resolve(child);
       }
     });
     child.stderr!.on('data', (chunk: Buffer) => process.stderr.write(chunk));
-    child.on('exit', (code) => {
+    child.once('error', (err) => {
       clearTimeout(timer);
-      if (code) reject(new Error(`server on ${port} exited with ${code}`));
+      reject(err);
+    });
+    // Any exit before "listening" is a failure, whatever the code or signal.
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (!started) reject(new Error(`server on ${port} exited before starting (code=${code}, signal=${signal})`));
     });
   });
 }
@@ -50,19 +75,19 @@ const describeIfBuilt = fs.existsSync(SERVER) ? describe : describe.skip;
 
 describeIfBuilt('two service instances sharing one database', () => {
   const dbPath = tempDbPath();
-  const portA = 41000 + Math.floor(Math.random() * 1000);
-  const portB = portA + 1;
-  const A = `http://127.0.0.1:${portA}`;
-  const B = `http://127.0.0.1:${portB}`;
-  let servers: ChildProcess[] = [];
+  let A = '';
+  let B = '';
 
   beforeAll(async () => {
+    const [portA, portB] = [await freePort(), await freePort()];
+    A = `http://127.0.0.1:${portA}`;
+    B = `http://127.0.0.1:${portB}`;
     const env = { ORDER_MILESTONE_N: '1', DISCOUNT_PERCENT_X: '20' };
-    servers = await Promise.all([startServer(portA, dbPath, env), startServer(portB, dbPath, env)]);
+    await Promise.all([startServer(portA, dbPath, env), startServer(portB, dbPath, env)]);
   });
 
   afterAll(() => {
-    servers.forEach((s) => s.kill());
+    children.forEach((c) => c.kill());
     removeDb(dbPath);
   });
 

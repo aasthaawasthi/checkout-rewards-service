@@ -234,7 +234,7 @@ drizzle/                    generated SQL migrations (from schema.ts via drizzle
   services/reportService.ts admin summary
   services/orderService.ts  order read model
   services/payment.ts       payment interface + fake
-  http/                     Express app, routes, validation, error handler
+  api/                      Express app, routes, request validation, error handler (the HTTP API layer)
 tests/                      Jest + Supertest, including a two-process test
 examples/                   demo.sh (curl walkthrough), Postman collection
 ```

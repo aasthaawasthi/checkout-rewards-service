@@ -289,7 +289,7 @@ A throw at any step rolls back steps 1–8.
 
 ## 6. Error model
 
-- **One envelope:** `{ "error": { "code", "message", "details" } }`, produced in one place (`http/errorHandler.ts`).
+- **One envelope:** `{ "error": { "code", "message", "details" } }`, produced in one place (`api/errorHandler.ts`).
 - **The status gives the category, the code gives the reason.**
   - `400`: the request itself is malformed (validation, invalid JSON, missing idempotency key).
   - `404`: the resource in the URL doesn't exist.

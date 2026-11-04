@@ -8,7 +8,7 @@
 import process from 'node:process';
 import { loadConfig } from './config';
 import { openDatabase } from './db/database';
-import { createApp } from './http/app';
+import { createApp } from './api/app';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 

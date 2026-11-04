@@ -7,7 +7,7 @@ import request from 'supertest';
 import { AppConfig } from '../src/config';
 import { DB, openDatabase } from '../src/db/database';
 import { coupons, idempotencyKeys, orderItems, orders, products } from '../src/db/schema';
-import { createApp } from '../src/http/app';
+import { createApp } from '../src/api/app';
 import { FakePaymentGateway } from '../src/services/payment';
 
 export function tempDbPath(): string {
